@@ -44,9 +44,6 @@ CONF_4M = "4MB"
 CONF_8M = "8MB"
 CONF_16M = "16MB"
 CONF_32M = "32MB"
-CONF_USER = "USER"
-CONF_AUTO = "AUTO"
-CONF_SYSTEM = "SYSTEM"
 
 def AUTO_LOAD() -> list[str]:
     auto_load = ["web_server_base", "ota.web_server"]
@@ -177,7 +174,6 @@ async def to_code(config):
        else: 
           output += f"spiffs,     data,   spiffs,     ,               "
        output += hex(disk_size) + ",\n"
-       print(hex(disk_size))
        
        part = PARTITIONS_FILENAME
        part_file=CORE.relative_build_path(part)
