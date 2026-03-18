@@ -1,1 +1,44 @@
+external_components:
+  - source:
+      type: local
+      path: my_components     
+    components: [ httpfs ]
 
+esp32:
+  board: esp32dev
+  flash_size: 4MB #<<<<<<<<< эту настройку использует компонент httpfs 
+  framework:
+    type: arduino #<<<<<<<<< только arduino  
+
+esphome:
+  name: $devicename
+  project:
+    name: "intercom.my"
+    version: "ESP32"
+  comment: "My test Intercom Esp32"
+
+web_server:
+  auth: #<<<<<<<<< эти настройки может использовать компонент httpfs 
+    username: !secret web_user
+    password: !secret web_pass
+
+httpfs:
+  id: http_fs_id
+  
+  filesystem: spiffs     # выбор файловой системы (LittleFS, SPIFFS, FFat)
+  
+  disk_kilobytes: 1500   # желаемый размер диска
+  auth:                  # авторизация для входа в веб интерфейс управления файлами (http://ip/files/), 
+    username: "USER"     # если требуется установка пароля/логина, а в web_server таких установок нет, 
+    password: "PASSWORD" # если не задать логин и пароль, то настройки будет аналгичны компоненту web_server
+  
+  web_auth: false        # при наличии настроек аутентификации в web_server, делает доступ к файл серверу безпарольным
+  
+  ext_http_report: false # отключить текствую расшифровку ошибок в веб интерфейсе (небольшое уменьшение размера прошивки)
+
+button:  # если нужно формматирование 
+  - platform: template
+    name: Format Storage
+    on_press:
+      - lambda: |-
+          http_fs_id->storFormat();
