@@ -75,11 +75,22 @@ def validate_auth(config):
        )
     return config
 
+def is_idf_framework():
+    """Detect framework from the validated ESP32 configuration."""
+    framework = (CORE.config or {}).get("esp32", {}).get("framework", {})
+    return framework.get("type") == "esp-idf"
+
+def fs_is(config, name):
+    """Accept both the enum value and its YAML spelling."""
+    value = config[CONF_FILE_SYSTEM]
+    return value == OPTIONS_FS[name] or (isinstance(value, str) and value.upper() == name)
+
 def validate_fs(config):
     require_vfs_dir()
-    if CONF_FILE_SYSTEM in config:
-       if config[CONF_FILE_SYSTEM]==CONF_FFAT:
-          require_fatfs()
+    # На этапе CONFIG_SCHEMA CORE.config может ещё не содержать esp32.framework.
+    # Выбор значения по умолчанию переносим в FINAL_VALIDATE_SCHEMA.
+    if CONF_FILE_SYSTEM in config and fs_is(config, CONF_FFAT):
+       require_fatfs()
     return config
 
 CONFIG_SCHEMA = cv.All(
@@ -89,7 +100,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(CONF_WEB_SERVER_BASE_ID): cv.use_id(
                 web_server_base.WebServerBase
             ),
-            cv.Required(CONF_FILE_SYSTEM): cv.enum(OPTIONS_FS, upper=True),
+            cv.Optional(CONF_FILE_SYSTEM): cv.enum(OPTIONS_FS, upper=True),
             cv.Optional(CONF_DISK_SIZE): cv.uint32_t,
             cv.Optional(CONF_WEB_AUTH): cv.boolean,
             cv.Optional(CONF_HTTP_REPORT, default = True): cv.boolean,
@@ -110,7 +121,6 @@ CONFIG_SCHEMA = cv.All(
             PLATFORM_ESP32,
         ]
     ),
-    cv.only_with_arduino,
     validate_fs,
     validate_auth,
 )
@@ -121,21 +131,26 @@ def _final_validate(config: ConfigType) -> ConfigType:
     if wifi_conf is None:
         raise cv.Invalid(f"HTTP file server requires the wifi component to be configured")
     
+    # Здесь доступна полная конфигурация, включая выбранный фреймворк.
+    framework = full_config.get("esp32", {}).get("framework", {}).get("type")
+    if CONF_FILE_SYSTEM not in config:
+        if framework == "esp-idf":
+            config[CONF_FILE_SYSTEM] = OPTIONS_FS[CONF_SPIFFS]
+        else:
+            raise cv.Invalid("Для Arduino необходимо явно указать httpfs.filesystem (littlefs, spiffs или ffat)")
+    if framework == "esp-idf" and not fs_is(config, CONF_SPIFFS):
+        raise cv.Invalid("ESP-IDF supports SPIFFS only")
+
     web_conf = full_config.get("web_server")
-    if web_conf is not None:
-       auth = web_conf.get("auth")
-       if auth is not None:
-          passw = auth.get("password")
-          user = auth.get("username")
-          if passw is not None and user is not None:
-             cg.add_define("HTTPFS_WEB_PASS", passw)
-             cg.add_define("HTTPFS_WEB_USER", user)
-             if CONF_AUTH in config:
-                 raise cv.Invalid(f"Settings '{CONF_AUTH}' are only possible if the web server does not have '{CONF_AUTH}' parameter")
-     
-    if (CONF_WEB_AUTH in config and config[CONF_WEB_AUTH] == True) and (web_conf is None or auth is None) :
-           raise cv.Invalid(f"Settings '{CONF_WEB_AUTH}: True' are only possible if the web server have '{CONF_AUTH}' parameter")
-          
+    web_auth = web_conf.get("auth") if web_conf is not None else None
+
+    # Авторизация веб-сервера может быть Basic или Digest. Проверку выполняет
+    # сам ESPHome; HTTPFS передаёт ему те же учётные данные.
+    if config.get(CONF_WEB_AUTH) is True and web_auth is None:
+        raise cv.Invalid("httpfs.web_auth: true требует web_server.auth")
+    if CONF_AUTH in config and web_auth is not None and config.get(CONF_WEB_AUTH, True):
+        raise cv.Invalid("httpfs.auth нельзя использовать вместе с web_server.auth; задайте web_auth: false для отключения авторизации HTTPFS")
+
     return config
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -145,7 +160,11 @@ async def to_code(config):
     paren = await cg.get_variable(config[CONF_WEB_SERVER_BASE_ID])
     var = cg.new_Pvariable(config[CONF_ID], paren)
     await cg.register_component(var, config)
-    cg.add_library("FS", None)
+    if is_idf_framework():
+        cg.add_define("HTTPFS_USE_ESP_IDF")
+        include_builtin_idf_component("spiffs")
+    else:
+        cg.add_library("FS", None)
 
     if CONF_DISK_SIZE in config:
       
@@ -169,7 +188,7 @@ async def to_code(config):
        output += f"app0,       app,    ota_0,      0x10000,        "+hex(app_size)+",\n"
        output += f"app1,       app,    ota_1,      ,               "+hex(app_size)+",\n"
        output += f"eeprom,     data,   0x99,       ,               0x1000,\n"
-       if config[CONF_FILE_SYSTEM] == CONF_FFAT :
+       if fs_is(config, CONF_FFAT) :
           output += f"ffat,       data,   fat,        ,               "
        else: 
           output += f"spiffs,     data,   spiffs,     ,               "
@@ -192,11 +211,12 @@ async def to_code(config):
           cg.add_platformio_option("board_build.partitions", part)
           print(f"\n\033[32mUse user partition table\n")
 
-    if config[CONF_FILE_SYSTEM] == CONF_LITTLEFS:
+    if fs_is(config, CONF_LITTLEFS) and not is_idf_framework():
        cg.add_library("LittleFS", None)
-    elif config[CONF_FILE_SYSTEM] == CONF_SPIFFS:   
-       cg.add_library("spiffs", None)
-    elif config[CONF_FILE_SYSTEM] == CONF_FFAT :
+    elif fs_is(config, CONF_SPIFFS) and not is_idf_framework():
+       # Явно подключаем библиотеку SPIFFS из Arduino Core (включая путь к SPIFFS.h).
+       cg.add_library("SPIFFS", None)
+    elif fs_is(config, CONF_FFAT) :
        cg.add_library("FFat", None)
        add_idf_sdkconfig_option("CONFIG_FATFS_LONG_FILENAMES",True)
        add_idf_sdkconfig_option("CONFIG_FATFS_MAX_LFN",255)
@@ -205,12 +225,16 @@ async def to_code(config):
     cg.add_define("HTTPFS_FILE_SYSTEM", config[CONF_FILE_SYSTEM])
     if config[CONF_HTTP_REPORT] == False:
        cg.add_define("HTTPFS_NO_EXT_REASON")
-    if CONF_WEB_AUTH in config and config[CONF_WEB_AUTH] == False:
-       cg.add_define("HTTPFS_NO_AUTH")
-    elif CONF_AUTH in config: 
-        auth=config[CONF_AUTH]
-        if CONF_PASSWORD in auth and CONF_USERNAME in auth:
-           cg.add_define("HTTPFS_LOCAL_AUTH")
-           cg.add_define("USE_WEBSERVER_AUTH")
-           cg.add(var.set_auth(auth[CONF_USERNAME], auth[CONF_PASSWORD])) 
- 
+    # Настройки авторизации передаём во время инициализации, а не через
+    # макросы компилятора: это сохраняет пароли со спецсимволами и не
+    # подставляет их в определения препроцессора.
+    if config.get(CONF_WEB_AUTH) is not False:
+        if CONF_AUTH in config:
+            auth = config[CONF_AUTH]
+            cg.add_define("USE_WEBSERVER_AUTH")
+            cg.add(var.set_auth(auth[CONF_USERNAME], auth[CONF_PASSWORD]))
+        else:
+            web_conf = (CORE.config or {}).get("web_server")
+            web_auth = web_conf.get("auth") if web_conf is not None else None
+            if web_auth is not None:
+                cg.add(var.set_auth(web_auth[CONF_USERNAME], web_auth[CONF_PASSWORD]))

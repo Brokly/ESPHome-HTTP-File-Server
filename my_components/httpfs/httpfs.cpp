@@ -8,7 +8,7 @@
 #include "esphome/core/progmem.h"
 #include "esphome/core/util.h"
 
-#include "Httpfs.h"
+#include "httpfs.h"
 
 namespace esphome {
 namespace httpfs {
@@ -40,8 +40,8 @@ void Httpfs::refreshJson(){
   jsData=jsData+",";
   this->addPairJson("u", (to_string(_FS.usedBytes())).c_str(), &jsData);
   jsData=jsData+",\"f\":[";
-  File root = _FS.open("/");
-  File file = root.openNextFile();
+  HttpfsFile root = _FS.open("/");
+  HttpfsFile file = root.openNextFile();
   
   for(uint8_t i=0; file; i=1){
     if(!file.isDirectory()){
@@ -70,20 +70,13 @@ void Httpfs::dump_config() {
   #endif
   ESP_LOGCONFIG(TAG, "     Size %d bytes", _FS.totalBytes()); 
   ESP_LOGCONFIG(TAG, "     Used %d bytes", _FS.usedBytes()); 
-  #ifdef HTTPFS_AUTH
-     #ifdef HTTPFS_WEB_PASS
-        ESP_LOGCONFIG(TAG, "     Web server credentials are used");
-     #else
-        ESP_LOGCONFIG(TAG, "     Active web authorization");
-     #endif
-  #else
-     ESP_LOGCONFIG(TAG, "      are available to everyone");
-  #endif
+  ESP_LOGCONFIG(TAG, "     %s", this->auth_enabled_ ? "Active web authorization (ESPHome Basic/Digest)" : "File access without authorization");
 }
 
 void Httpfs::setup() {
 
-  if(!_FS.begin()){
+  storage_ready_ = _FS.begin();
+  if(!storage_ready_){
      ESP_LOGE(TAG,"An Err has occurred while mounting storage, start format...");
      this->storFormat();
   } 
@@ -129,7 +122,10 @@ PlatformString Httpfs::mime_type(const PlatformString &file){
 }
 
 bool Httpfs::canHandle(AsyncWebServerRequest *request) const {
-  auto url = request->url(); 
+  // В ESPHome 2026.10.2 используем API web_server_idf независимо от фреймворка.
+  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+  std::string url(request->url_to(url_buf).c_str());
+
   if (request->method() == HTTP_GET) {
      return (url == this->index_url_ || url == this->json_url_ || url.find(this->download_url_)==0);
   } else if(request->method() == HTTP_POST) {
@@ -144,11 +140,11 @@ void Httpfs::destroyUploadContent(){
          this->upCont->file.close();
       }
       if(this->upCont->fileName){
-         delete this->upCont->fileName;
+         delete[] this->upCont->fileName;
          this->upCont->fileName=nullptr;
       }
       if(this->upCont->blobBuffer){
-         delete this->upCont->blobBuffer;
+         delete[] this->upCont->blobBuffer;
          this->upCont->blobBuffer=nullptr;
       }
       delete this->upCont;
@@ -163,7 +159,7 @@ void Httpfs::destroyDownloadContent(){
          this->downCont->file.close();
       }
       if(this->downCont->sendBuff){
-         delete this->downCont->sendBuff;
+         delete[] this->downCont->sendBuff;
          this->downCont->sendBuff=nullptr;
       }
       
@@ -264,7 +260,7 @@ bool Httpfs::saveUploadData(uint8_t* data, uint16_t index, uint16_t len){
 }
 
 void Httpfs::handleUpload(AsyncWebServerRequest *request, const PlatformString &filename, size_t index, uint8_t *data, size_t len, bool final){
-  #ifdef HTTPFS_AUTH 
+  #ifdef USE_WEBSERVER_AUTH 
      // Check authentication if enabled
      if (this->auth_enabled_) {
         if (!request->authenticate(this->username_.c_str(), this->password_.c_str())) {
@@ -295,7 +291,7 @@ void Httpfs::handleUpload(AsyncWebServerRequest *request, const PlatformString &
         }            
      } else if (final && this->upCont){ // успешное окончание приема куска
         if(this->upCont->received==this->upCont->fileSize){ // принят целый файл
-           File file = _FS.open(this->tempFileName, FILE_READ);
+           HttpfsFile file = _FS.open(this->tempFileName, FILE_READ);
            if(file){
               size_t fileSize=file.size();    
               file.close();
@@ -329,7 +325,7 @@ void Httpfs::handleUpload(AsyncWebServerRequest *request, const PlatformString &
   
 void Httpfs::handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
   /*
-  #ifdef HTTPFS_AUTH 
+  #ifdef USE_WEBSERVER_AUTH 
      if (this->auth_enabled_) {
        if (!request->authenticate(this->username_.c_str(), this->password_.c_str())) {
          return;
@@ -343,7 +339,7 @@ void Httpfs::handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t le
 bool Httpfs::sendDownloadData(){
    if(this->downCont){
       uint16_t i=0;
-      for(i; i<SEND_CHUNK_SIZE && this->downCont->file.available();i++){
+      for(; i<SEND_CHUNK_SIZE && this->downCont->file.available();i++){
          this->downCont->sendBuff[i]=this->downCont->file.read();   
       }
       if(httpd_resp_send_chunk(*(this->downCont->request), this->downCont->sendBuff, i)==ESP_OK){
@@ -371,7 +367,7 @@ bool Httpfs::initDownloadContent(const PlatformString &fileName, AsyncWebServerR
    if(!this->upCont){
       const char* chFileName = fileName.c_str();
       if(_FS.exists(chFileName)){ 
-         File file=_FS.open(chFileName,FILE_READ);
+         HttpfsFile file=_FS.open(chFileName,FILE_READ);
          if(file){
             this->destroyDownloadContent();
             this->downCont = new FileDownloadContent;          
@@ -386,7 +382,11 @@ bool Httpfs::initDownloadContent(const PlatformString &fileName, AsyncWebServerR
                   response->addHeader("Content-Disposition",content_disposition.c_str());
                   response->addHeader("Content-Length", to_string(file.size()).c_str());
                   response->addHeader("Cache-Control", "no-cache");
+                  #ifdef HTTPFS_USE_ESP_IDF
+                  this->downCont->file=std::move(file);
+#else
                   this->downCont->file=file;
+#endif
                   ESP_LOGD(TAG,"Create content for send file: %s",chFileName);
                   return this->sendDownloadData();
                } else {
@@ -410,14 +410,17 @@ bool Httpfs::initDownloadContent(const PlatformString &fileName, AsyncWebServerR
 
 
 void Httpfs::handleRequest(AsyncWebServerRequest *request) {
-  #ifdef HTTPFS_AUTH 
+  #ifdef USE_WEBSERVER_AUTH 
      if (this->auth_enabled_) {
        if (!request->authenticate(this->username_.c_str(), this->password_.c_str())) {
          return request->requestAuthentication();
        }
     }
   #endif
-  auto url = request->url();
+  // В ESPHome 2026.10.2 используем API web_server_idf независимо от фреймворка.
+  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+  std::string url(request->url_to(url_buf).c_str());
+
   AsyncWebServerResponse *response=nullptr;
 
   //ESP_LOGV(TAG,"handleRequest %s: %s",(request->method() == HTTP_GET)?"GET":(request->method() == HTTP_POST)?"POST":"UNEXPECT",url.c_str());

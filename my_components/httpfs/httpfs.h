@@ -9,44 +9,42 @@
 #include <esp_task_wdt.h>
 
 #include <vector>
+#include <string>
+#include <utility>
+#ifdef HTTPFS_USE_ESP_IDF
+#include "httpfs_idf_storage.h"
+#define _FS idf_spiffs
+#define FILE_WRITE "wb"
+#define FILE_READ "rb"
+#else
 #include "FS.h"
 
 #if HTTPFS_FILE_SYSTEM == 0
    #include "LittleFS.h"
    #define _FS LittleFS
 #elif HTTPFS_FILE_SYSTEM == 1
-   #include "spiffs.h"
+   #include <SPIFFS.h>
    #define _FS SPIFFS
 #elif HTTPFS_FILE_SYSTEM == 2
    #include "FFat.h"
    #define _FS FFat
 #endif
-
-#ifndef HTTPFS_NO_AUTH // авторизация отключена
-
-   #ifdef HTTPFS_WEB_PASS // пароль из конфига web_server определен
-      #ifdef HTTPFS_WEB_USER // юзер из конфига web_server определен
-         #define HTTPFS_WEB_CRED // есть авторизация с вебсервера
-         #define HTTPFS_AUTH // активируем авторизацию
-      #endif
-   #endif
-
-   #ifndef HTTPFS_WEB_CRED // если есть учетные данные с веб сервера то локальная авторзация работать не будет
-      #ifdef HTTPFS_LOCAL_AUTH // есть параметры локальной авторизацции 
-         #define HTTPFS_AUTH // активируем авторизацию
-      #endif
-   #endif
-   
-#endif
+#endif // HTTPFS_USE_ESP_IDF
 
 namespace esphome {
 namespace httpfs {
+
+#ifdef HTTPFS_USE_ESP_IDF
+using HttpfsFile = IdfFile;
+#else
+using HttpfsFile = fs::File;
+#endif
 
 // File upload content
 struct FileUploadContent {
   char* fileName{nullptr}; 
   uint8_t* blobBuffer{nullptr};
-  File file;
+  HttpfsFile file;
   size_t fileSize{0};      
   size_t blobIndex{0};
   size_t buffCounter{0};
@@ -55,7 +53,7 @@ struct FileUploadContent {
 
 // File download content
 struct FileDownloadContent {
-  File file;
+  HttpfsFile file;
   size_t chunkCounter{0};  
   AsyncWebServerRequest *request{nullptr};
   char* sendBuff{nullptr};
@@ -66,6 +64,39 @@ class Httpfs : public Component, public AsyncWebHandler {
 
   explicit Httpfs(web_server_base::WebServerBase *base) : base_(base) {}
 
+  // Public, framework-independent filesystem API. Paths are relative to the
+  // mounted filesystem root, for example "/settings.json".
+  // Call only after HTTPFS setup() has successfully mounted the filesystem.
+  bool storage_ready() const { return storage_ready_; }
+  bool file_exists(const char *path) { return storage_ready_ && path && _FS.exists(path); }
+  bool file_remove(const char *path) { return storage_ready_ && path && _FS.remove(path); }
+  bool file_rename(const char *from, const char *to) {
+    return storage_ready_ && from && to && _FS.rename(from, to);
+  }
+  HttpfsFile file_open(const char *path, const char *mode = "r") {
+    if (!storage_ready_ || !path || !mode) return {};
+    return _FS.open(path, mode);
+  }
+  size_t storage_total_bytes() { return storage_ready_ ? _FS.totalBytes() : 0; }
+  size_t storage_used_bytes() { return storage_ready_ ? _FS.usedBytes() : 0; }
+  // Names are returned with a leading slash, suitable for file_open().
+  std::vector<std::string> file_list() {
+    std::vector<std::string> result;
+    if (!storage_ready_) return result;
+    HttpfsFile root = _FS.open("/");
+    if (!root || !root.isDirectory()) return result;
+    for (HttpfsFile entry = root.openNextFile(); entry; entry = root.openNextFile()) {
+      if (!entry.isDirectory()) {
+        std::string name = entry.name();
+        if (!name.empty() && name[0] != '/') name.insert(name.begin(), '/');
+        result.push_back(std::move(name));
+      }
+      entry.close();
+    }
+    root.close();
+    return result;
+  }
+
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -75,14 +106,11 @@ class Httpfs : public Component, public AsyncWebHandler {
   void handleUpload(AsyncWebServerRequest *request, const PlatformString &filename, size_t index, uint8_t *data, size_t len, bool final) override;
   void handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) override;
   bool isRequestHandlerTrivial() const override { return false; }
+  // Используем тот же механизм проверки Basic/Digest, что и web_server.
   void set_auth(const PlatformString &username, const PlatformString &password) {
-     #ifdef HTTPFS_AUTH
-        #ifndef HTTPFS_WEB_PASS
-          this->username_ = username;
-          this->password_ = password;
-          this->auth_enabled_ = true;
-        #endif
-     #endif   
+    this->username_ = username;
+    this->password_ = password;
+    this->auth_enabled_ = !username.empty();
   }
 
   void storFormat(){
@@ -97,11 +125,12 @@ class Httpfs : public Component, public AsyncWebHandler {
         wdtConfig = {5000000, (1<<1 | 1<<0), true};
         esp_task_wdt_reconfigure(&wdtConfig);
      #endif 
-     _FS.begin();     
+     storage_ready_ = _FS.begin();
      ESP_LOGI(TAG,"Format storage - %s", formatRes ? "OK" : "ERROR");
   }
 
  protected:
+  bool storage_ready_{false};
   web_server_base::WebServerBase *base_;
   const char *TAG{"Httpfs"};
   const char *index_url_{"/files"};
@@ -138,18 +167,10 @@ class Httpfs : public Component, public AsyncWebHandler {
   const char* errorReason{&dongle};
   uint16_t httpError;
  
-  // Authentication
-#ifdef HTTPFS_AUTH
-  #ifdef HTTPFS_WEB_PASS
-     PlatformString username_{HTTPFS_WEB_USER};
-     PlatformString password_{HTTPFS_WEB_PASS};
-     bool auth_enabled_{true};
-  #else 
-     PlatformString username_;
-     PlatformString password_;
-     bool auth_enabled_{false};
-  #endif
-#endif
+  // Авторизация: тип Basic/Digest выбирается самим ESPHome при сборке.
+  PlatformString username_;
+  PlatformString password_;
+  bool auth_enabled_{false};
 
 };
 
