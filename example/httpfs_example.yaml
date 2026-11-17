@@ -1,44 +1,54 @@
+# Пример HTTPFS для ESPHome 2026.10.2.
+# Работает ТОЛЬКО НА ESP32. Для Arduino выбор файловой системы обязателен.
+substitutions:
+  devicename: httpfs-arduino
+
 external_components:
   - source:
       type: local
-      path: my_components     
-    components: [ httpfs ]
+      path: my_components
+    components: [httpfs]
 
 esp32:
   board: esp32dev
-  flash_size: 4MB #<<<<<<<<< эту настройку использует компонент httpfs 
+  flash_size: 4MB #<<<<<<<<< эту настройку использует компонент httpfs
   framework:
-    type: arduino #<<<<<<<<< только arduino  
+    type: arduino #<<<<<<<<< Arduino: LittleFS, SPIFFS, FFat | ESP-IDF: только SPIFFS
 
 esphome:
-  name: $devicename
+  name: ${devicename}
   project:
-    name: "intercom.my"
+    name: "file_server.my"
     version: "ESP32"
-  comment: "My test Intercom Esp32"
+  comment: "My test File Server Esp32"
+
+logger:
+api:
+ota:
+  - platform: esphome
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
 
 web_server:
-  auth: #<<<<<<<<< эти настройки может использовать компонент httpfs 
-    username: !secret web_user
-    password: !secret web_pass
+  port: 80
+  # auth: digest #or basic  #<<<<<<<<< эти настройки может использовать компонент httpfs
+  #   username: !secret web_user
+  #   password: !secret web_pass
 
 httpfs:
   id: http_fs_id
-  
-  filesystem: spiffs     # выбор файловой системы (LittleFS, SPIFFS, FFat)
-  
+  filesystem: spiffs     # выбор файловой системы (LittleFS, SPIFFS, FFat); для фреймворка Arduino обязательно
   disk_kilobytes: 1500   # желаемый размер диска
-  auth:                  # авторизация для входа в веб интерфейс управления файлами (http://ip/files/), 
-    username: "USER"     # если требуется установка пароля/логина, а в web_server таких установок нет, 
-    password: "PASSWORD" # если не задать логин и пароль, то настройки будет аналгичны компоненту web_server
-  
-  web_auth: false        # при наличии настроек аутентификации в web_server, делает доступ к файл серверу безпарольным
-  
-  ext_http_report: false # отключить текствую расшифровку ошибок в веб интерфейсе (небольшое уменьшение размера прошивки)
+  # auth:                 # авторизация для входа в веб-интерфейс управления файлами (http://ip/files/)
+  #   username: "USER"   # если требуется установка пароля/логина, а в web_server таких установок нет
+  #   password: "PASSWORD" # если не задать логин и пароль, настройки будут аналогичны компоненту web_server
+  # web_auth: false       # при наличии аутентификации в web_server делает доступ к файловому серверу беспарольным
+  # ext_http_report: false # отключить текстовую расшифровку ошибок в веб-интерфейсе (небольшое уменьшение размера прошивки)
 
-button:  # если нужно формматирование 
+button:  # если нужно форматирование (удаляет все файлы!)
   - platform: template
     name: Format Storage
     on_press:
       - lambda: |-
-          http_fs_id->storFormat();
+          id(http_fs_id).storFormat();
