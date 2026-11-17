@@ -137,7 +137,7 @@ def _final_validate(config: ConfigType) -> ConfigType:
         if framework == "esp-idf":
             config[CONF_FILE_SYSTEM] = OPTIONS_FS[CONF_SPIFFS]
         else:
-            raise cv.Invalid("Для Arduino необходимо явно указать httpfs.filesystem (littlefs, spiffs или ffat)")
+            raise cv.Invalid("Arduino requires an explicit httpfs.filesystem setting (littlefs, spiffs, or ffat)")
     if framework == "esp-idf" and not fs_is(config, CONF_SPIFFS):
         raise cv.Invalid("ESP-IDF supports SPIFFS only")
 
@@ -147,9 +147,9 @@ def _final_validate(config: ConfigType) -> ConfigType:
     # Авторизация веб-сервера может быть Basic или Digest. Проверку выполняет
     # сам ESPHome; HTTPFS передаёт ему те же учётные данные.
     if config.get(CONF_WEB_AUTH) is True and web_auth is None:
-        raise cv.Invalid("httpfs.web_auth: true требует web_server.auth")
+        raise cv.Invalid("httpfs.web_auth: true requires web_server.auth to be configured")
     if CONF_AUTH in config and web_auth is not None and config.get(CONF_WEB_AUTH, True):
-        raise cv.Invalid("httpfs.auth нельзя использовать вместе с web_server.auth; задайте web_auth: false для отключения авторизации HTTPFS")
+        raise cv.Invalid("httpfs.auth cannot be used together with web_server.auth; set httpfs.web_auth: false to disable web server authentication for HTTPFS")
 
     return config
 
